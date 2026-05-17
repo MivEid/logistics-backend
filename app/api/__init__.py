@@ -3,8 +3,12 @@ from fastapi import APIRouter
 from config import settings
 from .auth import router as auth_router
 from .users import router as users_router
+from .transport_categories import router as transport_categories_router
+from .transports import router as transports_router
 
 router = APIRouter(prefix=settings.url.prefix)
 
 router.include_router(auth_router)
 router.include_router(users_router)
+router.include_router(transport_categories_router)
+router.include_router(transports_router)
