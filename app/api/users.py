@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from authentication import current_admin, current_active_user
 from config import settings
 from models import db_helper, User
-from schemas.users import UserListRead
+from schemas.users import UserListRead, UserUpdate
 from services.users import UserService
 
 router = APIRouter(tags=["Users"], prefix=settings.url.users)
@@ -40,6 +40,25 @@ async def index(
     return await apaginate(session, stmt)
 
 
+@router.get("/me", response_model=UserListRead)
+async def get_me(
+    session: Annotated[AsyncSession, Depends(db_helper.session_getter)],
+    current_user: User = Depends(current_active_user),
+):
+    svc = UserService(session)
+    return await svc.get_by_id(current_user.id)
+
+
+@router.patch("/me", response_model=UserListRead)
+async def update_me(
+    data: UserUpdate,
+    session: Annotated[AsyncSession, Depends(db_helper.session_getter)],
+    current_user: User = Depends(current_active_user),
+):
+    svc = UserService(session)
+    return await svc.update(current_user.id, data.model_dump(exclude_unset=True), allow_role_change=False)
+
+
 @router.get("/{user_id}", response_model=UserListRead)
 async def show(
     user_id: int,
@@ -48,3 +67,24 @@ async def show(
 ):
     svc = UserService(session)
     return await svc.get_by_id(user_id)
+
+
+@router.patch("/{user_id}", response_model=UserListRead)
+async def update_user(
+    user_id: int,
+    data: UserUpdate,
+    session: Annotated[AsyncSession, Depends(db_helper.session_getter)],
+    _current_user: User = Depends(current_admin),
+):
+    svc = UserService(session)
+    return await svc.update(user_id, data.model_dump(exclude_unset=True), allow_role_change=True)
+
+
+@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_user(
+    user_id: int,
+    session: Annotated[AsyncSession, Depends(db_helper.session_getter)],
+    current_user: User = Depends(current_admin),
+):
+    svc = UserService(session)
+    await svc.delete(user_id, current_user.id)

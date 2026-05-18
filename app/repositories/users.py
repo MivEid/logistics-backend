@@ -25,3 +25,13 @@ class UserRepository:
         return await self.session.scalar(
             self._with_role().where(User.email == email)
         )
+
+    async def update(self, user: User, data: dict) -> User:
+        for field, value in data.items():
+            setattr(user, field, value)
+        await self.session.flush()
+        return await self.get_by_id(user.id)
+
+    async def delete(self, user: User) -> None:
+        await self.session.delete(user)
+        await self.session.flush()
