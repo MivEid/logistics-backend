@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 from fastapi_pagination import Page
 from fastapi_pagination.ext.sqlalchemy import apaginate
 from fastapi_filter import FilterDepends
@@ -22,6 +22,9 @@ from schemas.orders import (
 from services.orders import OrderService as OrderServiceClass
 
 router = APIRouter(tags=["Orders"], prefix=settings.url.orders)
+
+ALLOWED_INCLUDE = {"courier", "administrator", "client_shipment", "services"}
+ALLOWED_FIELDS = {"id", "status", "start_date", "end_date", "total_price_rubles", "total_time_minutes", "version"}
 
 
 class OrderFilter(Filter):
@@ -52,24 +55,123 @@ def _full_order_query():
     )
 
 
-@router.get("", response_model=Page[OrderRead], description="**Сортировка (order_by):** id, status, start_date, end_date, courier_id. Префикс `-` для DESC, например: `-start_date`")
+def _serialize_order(order: Order, include_set: set, fields_set: set) -> dict:
+    data: dict = {
+        "id": order.id,
+        "status": order.status,
+        "start_date": order.start_date.isoformat() if order.start_date else None,
+        "end_date": order.end_date.isoformat() if order.end_date else None,
+        "total_price_rubles": order.total_price_rubles,
+        "total_time_minutes": order.total_time_minutes,
+        "version": order.version,
+    }
+
+    if "courier" in include_set and order.courier:
+        c = order.courier
+        data["courier"] = {"id": c.id, "full_name": c.full_name, "email": c.email}
+
+    if "administrator" in include_set and order.administrator:
+        a = order.administrator
+        data["administrator"] = {"id": a.id, "full_name": a.full_name, "email": a.email}
+
+    if "client_shipment" in include_set:
+        s = order.client_shipment
+        data["client_shipment"] = {
+            "id": s.id,
+            "destination": s.destination,
+            "pickup_address": s.pickup_address,
+            "weight": s.weight.format,
+            "client": {"id": s.client.id, "full_name": s.client.full_name} if s.client else None,
+            "transport": {"id": s.transport.id, "model": s.transport.model} if s.transport else None,
+        } if s else None
+
+    if "services" in include_set:
+        data["services"] = [
+            {
+                "id": os.service.id,
+                "name": os.service.name,
+                "price": os.service.price.format,
+                "duration_minutes": os.service.duration.minutes,
+            }
+            for os in order.order_services if os.service
+        ]
+
+    if fields_set:
+        relation_keys = include_set & {"courier", "administrator", "client_shipment", "services"}
+        data = {k: v for k, v in data.items() if k in fields_set or k in relation_keys}
+
+    return data
+
+
+@router.get(
+    "",
+    description=(
+        "**Сортировка (order_by):** id, status, start_date, end_date, courier_id. Префикс `-` для DESC.\n\n"
+        "**include** — через запятую: `courier`, `administrator`, `client_shipment`, `services`\n\n"
+        "**select** — через запятую: `id`, `status`, `start_date`, `end_date`, `total_price_rubles`, `total_time_minutes`, `version`"
+    ),
+)
 async def index(
     session: Annotated[AsyncSession, Depends(db_helper.session_getter)],
     order_filter: OrderFilter = FilterDepends(OrderFilter),
     current_user: User = Depends(current_active_user),
+    include: str | None = Query(None, description="courier, administrator, client_shipment, services"),
+    select_fields: str | None = Query(None, alias="select", description="id, status, start_date, end_date, total_price_rubles, total_time_minutes, version"),
+    page: int = Query(1, ge=1, description="Page number"),
+    size: int = Query(50, ge=1, le=200, description="Page size"),
 ):
-    stmt = _full_order_query()
+    include_set = {i.strip() for i in include.split(",")} & ALLOWED_INCLUDE if include else set()
+    fields_set = {f.strip() for f in select_fields.split(",")} & ALLOWED_FIELDS if select_fields else set()
 
+    if not include_set and not fields_set:
+        stmt = _full_order_query()
+        if current_user.role_id == 2:
+            stmt = stmt.where(Order.courier_id == current_user.id)
+        elif current_user.role_id == 3:
+            stmt = stmt.join(Order.client_shipment).where(ClientShipment.client_id == current_user.id)
+        stmt = order_filter.filter(stmt)
+        stmt = order_filter.sort(stmt)
+
+        # fetch results and use the regular `paginate` helper to avoid
+        # pagination context issues with `apaginate`
+        result = await session.scalars(stmt)
+        orders = list(result.unique().all())
+        items = [OrderRead.model_validate(o) for o in orders]
+
+        # manual pagination to avoid dependency on fastapi_pagination runtime config
+        total = len(items)
+        start = (page - 1) * size
+        end = start + size
+        paged = items[start:end]
+        return {
+            "total": total,
+            "page": page,
+            "size": size,
+            "items": paged,
+        }
+
+    stmt = _full_order_query()
     if current_user.role_id == 2:
         stmt = stmt.where(Order.courier_id == current_user.id)
     elif current_user.role_id == 3:
-        stmt = stmt.join(Order.client_shipment).where(
-            ClientShipment.client_id == current_user.id
-        )
-
+        stmt = stmt.join(Order.client_shipment).where(ClientShipment.client_id == current_user.id)
     stmt = order_filter.filter(stmt)
     stmt = order_filter.sort(stmt)
-    return await apaginate(session, stmt)
+
+    result = await session.scalars(stmt)
+    orders = list(result.unique().all())
+    serialized = [_serialize_order(o, include_set, fields_set) for o in orders]
+
+    total = len(serialized)
+    start = (page - 1) * size
+    end = start + size
+    paged = serialized[start:end]
+    return {
+        "total": total,
+        "page": page,
+        "size": size,
+        "items": paged,
+    }
 
 
 @router.post("", response_model=OrderRead, status_code=status.HTTP_201_CREATED)
@@ -84,14 +186,30 @@ async def store(
     return await svc.repo.get_by_id(order.id)
 
 
-@router.get("/{order_id}", response_model=OrderRead)
+@router.get(
+    "/{order_id}",
+    description=(
+        "**include** — через запятую: `courier`, `administrator`, `client_shipment`, `services`\n\n"
+        "**select** — через запятую: `id`, `status`, `start_date`, `end_date`, `total_price_rubles`, `total_time_minutes`, `version`"
+    ),
+)
 async def show(
     order_id: int,
     session: Annotated[AsyncSession, Depends(db_helper.session_getter)],
     current_user: User = Depends(current_active_user),
+    include: str | None = Query(None, description="courier, administrator, client_shipment, services"),
+    select_fields: str | None = Query(None, alias="select", description="id, status, start_date, end_date, total_price_rubles, total_time_minutes, version"),
 ):
     svc = OrderServiceClass(session)
-    return await svc.get_by_id_for_user(order_id, current_user.id, current_user.role_id)
+    order = await svc.get_by_id_for_user(order_id, current_user.id, current_user.role_id)
+
+    include_set = {i.strip() for i in include.split(",")} & ALLOWED_INCLUDE if include else set()
+    fields_set = {f.strip() for f in select_fields.split(",")} & ALLOWED_FIELDS if select_fields else set()
+
+    if not include_set and not fields_set:
+        return OrderRead.model_validate(order)
+
+    return _serialize_order(order, include_set, fields_set)
 
 
 @router.put("/{order_id}", response_model=OrderRead)

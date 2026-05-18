@@ -62,6 +62,9 @@ async def store(
 ):
     if current_user.role_id == 3:
         data = data.model_copy(update={"client_id": current_user.id})
+    elif data.client_id is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=422, detail="Поле client_id обязательно для администратора")
     svc = ClientShipmentService(session)
     shipment = await svc.create(data)
     await session.commit()

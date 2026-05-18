@@ -38,7 +38,7 @@ class ClientShipmentRead(BaseModel):
 
 
 class ClientShipmentCreate(BaseModel):
-    client_id: int
+    client_id: int | None = Field(None, description="ID клиента. Для роли клиента подставляется автоматически")
     transport_id: int
     weight_kg: float = Field(..., gt=0, description="Вес груза в килограммах")
     destination: str = Field(..., min_length=1, max_length=500)
