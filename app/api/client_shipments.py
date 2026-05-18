@@ -58,8 +58,10 @@ async def index(
 async def store(
     data: ClientShipmentCreate,
     session: Annotated[AsyncSession, Depends(db_helper.session_getter)],
-    _: User = Depends(current_admin),
+    current_user: User = Depends(current_active_user),
 ):
+    if current_user.role_id == 3:
+        data = data.model_copy(update={"client_id": current_user.id})
     svc = ClientShipmentService(session)
     shipment = await svc.create(data)
     await session.commit()
